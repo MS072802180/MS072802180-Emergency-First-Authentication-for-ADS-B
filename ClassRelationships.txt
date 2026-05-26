@@ -1,0 +1,244 @@
+ADS-B Dual-Path Authentication — Class Relationships Explained
+==============================================================
+
+This document describes, step by step, how the classes and scripts in
+this system relate to each other and why each connection exists.
+Read this alongside SystemUML.txt, which shows the same relationships
+as a formal diagram.
+
+
+OVERVIEW
+--------
+There are four layers in this system:
+
+  Layer 1 — Entry Point      : AdsbAuthMain.m
+  Layer 2 — Core Engine      : AuthSystem.m
+  Layer 3 — Support Classes  : AuthKey, SecureKeyStore, ProximityVerifier
+  Layer 4 — Utilities        : computeMAC, signVerify, generateKeypair
+
+
+STEP 1: Everything starts at AdsbAuthMain
+-----------------------------------------
+AdsbAuthMain is the only file you run directly. It has no class of its
+own — it is a plain MATLAB script that acts as the coordinator for the
+entire simulation.
+
+What AdsbAuthMain does:
+  - Creates one instance of AuthSystem (the core engine).
+  - Calls methods on that instance to issue keys, compute MACs,
+    and verify messages across seven tests.
+  - Calls runProximityTest() and runProximityMonteCarlo() as
+    standalone functions for the proximity tests.
+  - Collects results and draws the output figures.
+
+Relationship type: AdsbAuthMain "uses" AuthSystem.
+  It creates it, calls it, and reads its results.
+  This is a dependency (dashed arrow in UML).
+
+
+STEP 2: AuthSystem is the central engine
+-----------------------------------------
+AuthSystem is the most important class. It contains all authentication
+logic for both paths and coordinates the other classes.
+
+AuthSystem has two main jobs:
+
+  Job A — Normal Path (TESLA):
+    AuthSystem pre-computes a chain of SHA-256 keys internally
+    (stored in keyChain). When AdsbAuthMain calls getNextNormalKey(),
+    AuthSystem takes the next key from this chain, wraps it in an
+    AuthKey object, and stores it in the SecureKeyStore for later
+    retrieval. When discloseNormalKey() is called, AuthSystem reads
+    the key back from SecureKeyStore (using peekKey, a non-consuming
+    read), checks that the chain is intact, and verifies any buffered
+    messages that were waiting for it.
+
+  Job B — Emergency Path (Instant):
+    AuthSystem calls generateKeypair() at startup to get a public/
+    private key pair. When AdsbAuthMain calls issueEmergencyKey(),
+    AuthSystem hashes the aircraft's ICAO address and key ID, signs
+    the result using signVerify(), and stores the resulting AuthKey
+    in the SecureKeyStore. When verifyAuth() is called for an
+    emergency key, AuthSystem runs four checks in sequence: key not
+    already used, no replay, signature valid (via signVerify()), and
+    MAC matches (via computeMAC()).
+
+The routing decision in verifyAuth():
+    AuthSystem looks at the keyID. If keyID > CHAIN_LENGTH (100 by
+    default), it treats the message as emergency and verifies
+    instantly. If keyID <= CHAIN_LENGTH, it treats it as a normal
+    message and buffers it until the key is disclosed.
+
+Relationships from AuthSystem:
+  - OWNS SecureKeyStore (composition). AuthSystem creates the store
+    in its constructor and is responsible for it. The store cannot
+    exist independently.
+  - CREATES AuthKey objects (dependency). AuthSystem calls the
+    AuthKey constructor when issuing keys for both paths.
+  - USES computeMAC (dependency). Called every time a MAC needs
+    to be computed or verified.
+  - USES signVerify (dependency). Called to sign emergency keys at
+    issuance and to verify signatures during authentication.
+  - USES generateKeypair (dependency). Called once in the
+    constructor to set up the public/private key pair.
+  - DELEGATES TO ProximityVerifier (dependency). AuthSystem has a
+    verifyProximity() method that calls ProximityVerifier's static
+    methods directly when a proximity check is requested.
+
+
+STEP 3: AuthKey is a plain data record
+---------------------------------------
+AuthKey holds the data for a single key: its ID, the raw key
+material (32 bytes), the time it was issued, the ground station
+signature (for emergency keys), and a flag indicating whether it
+has been used.
+
+AuthKey does not contain any logic. It is simply a structured
+container — the equivalent of a struct with a constructor.
+
+Relationships involving AuthKey:
+  - AuthSystem creates AuthKey objects and passes them to
+    SecureKeyStore for storage.
+  - SecureKeyStore holds AuthKey objects in its internal map.
+  - AdsbAuthMain receives AuthKey objects back from SecureKeyStore
+    (via useKey()) and passes them into AuthSystem's MAC and
+    verification methods.
+
+Note on the 'used' flag:
+  AuthKey is a value class in MATLAB, not a handle class. This means
+  setting key.used = true on a local copy does not affect the copy
+  stored inside SecureKeyStore. Replay protection for emergency keys
+  is therefore handled by AuthSystem's usedEmergencyKeyIDs map, not
+  by the used flag directly. The flag is set on the copy returned to
+  the caller as a convenience marker only.
+
+
+STEP 4: SecureKeyStore is a protected container
+------------------------------------------------
+SecureKeyStore simulates a hardware TPM (Trusted Platform Module).
+Its job is to store AuthKey objects securely and enforce single-use
+access.
+
+It has three access methods:
+  - storeKey(key) : saves a key under its keyID.
+  - useKey(keyID) : returns the key and marks it as used. Subsequent
+    calls for the same keyID return empty. Used for emergency keys,
+    which should only be retrieved once.
+  - peekKey(keyID): returns the key WITHOUT marking it as used.
+    Added specifically for the normal path, where AuthSystem needs
+    to read a chain key multiple times during buffer processing and
+    chain-integrity checks without consuming it.
+
+SecureKeyStore is a handle class, meaning all changes (marking a key
+as used, storing new keys) persist on the single instance that
+AuthSystem owns.
+
+Relationship: SecureKeyStore HOLDS AuthKey objects (aggregation).
+  It stores them in an internal containers.Map and returns them on
+  request. The AuthKey objects are not destroyed when the store is
+  accessed — they remain in the map until the simulation ends.
+
+
+STEP 5: ProximityVerifier is entirely self-contained
+------------------------------------------------------
+ProximityVerifier implements the Hancke-Kuhn protocol. All of its
+methods are static, meaning you never create an instance of it. You
+call its methods directly using the class name.
+
+Its methods form a pipeline:
+  1. buildRegisters()  — generates two 64-bit random bit registers
+                         that simulate the shared secret.
+  2. measureRTT()      — simulates the rapid bit exchange, computing
+                         the total round-trip time across 64 bits,
+                         including Gaussian hardware jitter and any
+                         attacker relay delay.
+  3. computeRange()    — converts the total RTT into an estimated
+                         physical distance using d = c * (t - t_proc) / 2.
+  4. checkAccess()     — runs the full pipeline and returns whether
+                         access is granted based on both the
+                         cryptographic check and the distance bound.
+
+Relationships:
+  - AuthSystem calls ProximityVerifier.checkAccess() from its
+    verifyProximity() method when a caller requests a proximity check.
+  - runProximityTest calls ProximityVerifier methods directly to run
+    two named scenarios and print the results.
+  - runProximityMonteCarlo calls ProximityVerifier methods in a loop
+    across 500 random distances, collecting data for the scatter plot.
+
+ProximityVerifier does not know about AuthSystem, AuthKey, or any
+other class. It only knows about physics (speed of light, RTT).
+
+
+STEP 6: The utility functions are stateless helpers
+----------------------------------------------------
+computeMAC, signVerify, and generateKeypair are standalone MATLAB
+functions (each in their own .m file). They have no state and no
+dependency on any class in the system.
+
+  computeMAC(key, message):
+    Computes an HMAC-SHA256 and returns the first 7 bytes. Used by
+    AuthSystem for both path's MAC computation and verification.
+    Contains a Java-based implementation for speed and a pure-MATLAB
+    fallback for environments where Java is unavailable.
+
+  signVerify(mode, keyVal, keyMaterial, signature):
+    Called with mode = 'sign' to produce a 16-byte signature, or
+    mode = 'verify' to check one. Used by AuthSystem during emergency
+    key issuance and during instant verification.
+
+  generateKeypair():
+    Called once by AuthSystem's constructor to produce the simulated
+    public/private key pair used to sign and verify emergency keys.
+
+These three functions are called only by AuthSystem. Nothing else in
+the system calls them directly.
+
+
+STEP 7: The simulation scripts call into the system
+----------------------------------------------------
+runProximityTest and runProximityMonteCarlo are standalone functions
+called by AdsbAuthMain during Tests 6 and 7 respectively.
+
+They do not interact with AuthSystem at all. Their only dependency is
+ProximityVerifier, whose static methods they call directly.
+
+  runProximityTest:
+    Sets up two named scenarios (legitimate at 1.0 m, relay attack at
+    50.0 m with 5 µs delay) and prints a formatted result for each.
+
+  runProximityMonteCarlo:
+    Loops 500 times over random distances, runs both scenarios per
+    trial, collects estimated distances, prints summary statistics,
+    and draws the scatter plot figure. Also saves the figure to
+    proximityAnalysis.png.
+
+
+SUMMARY OF ALL RELATIONSHIPS
+-----------------------------
+
+  AdsbAuthMain     -->  AuthSystem             creates and drives
+  AdsbAuthMain     -->  runProximityTest        calls
+  AdsbAuthMain     -->  runProximityMonteCarlo  calls
+
+  AuthSystem       *->  SecureKeyStore          owns (composition)
+  AuthSystem       ..>  AuthKey                 creates
+  AuthSystem       ..>  computeMAC              uses
+  AuthSystem       ..>  signVerify              uses
+  AuthSystem       ..>  generateKeypair         uses (constructor only)
+  AuthSystem       ..>  ProximityVerifier       delegates proximity check
+
+  SecureKeyStore   o->  AuthKey                 holds (aggregation)
+
+  runProximityTest        ..>  ProximityVerifier   calls static methods
+  runProximityMonteCarlo  ..>  ProximityVerifier   calls static methods
+
+
+WHAT IS NOT CONNECTED
+---------------------
+  - AuthKey has no outgoing relationships. It is purely passive data.
+  - ProximityVerifier has no knowledge of any other class.
+  - computeMAC, signVerify, generateKeypair have no knowledge of any
+    class. They are pure input/output functions.
+  - runProximityTest and runProximityMonteCarlo do not interact with
+    AuthSystem, SecureKeyStore, or AuthKey at all.

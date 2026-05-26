@@ -1,0 +1,234 @@
+@startuml
+' ===================================================
+' ADS-B Dual-Path Authentication System
+' UML Class Diagram
+' ===================================================
+
+skinparam classAttributeIconSize 0
+skinparam backgroundColor #FEFEFE
+skinparam shadowing false
+
+!define BG_CORE    #F0F4FF
+!define BG_UTIL    #F8F8F8
+!define BG_TEST    #F0FFF0
+!define BG_ENUM    #FFF8F0
+!define BORDER     #444444
+
+skinparam class {
+    BackgroundColor BG_CORE
+    BorderColor BORDER
+    FontName Arial
+    FontSize 11
+    HeaderBackgroundColor #DDEEFF
+}
+
+skinparam package {
+    BorderColor #888888
+    FontName Arial
+    FontSize 12
+}
+
+skinparam arrow {
+    Color #3355AA
+    FontColor #333333
+    FontSize 10
+}
+
+' ===================================================
+' CORE CLASSES
+' ===================================================
+
+class AuthSystem {
+    + keyStore : SecureKeyStore
+    + publicKey : uint64
+    + privateKey : uint64
+    + usedEmergencyKeyIDs : Map
+    + verificationLog : cell
+    + keyChain : cell
+    + currentKeyIndex : int
+    + disclosedUntilIndex : int
+    + messageBuffer : cell
+    + DELAY_PACKETS : int
+    + CHAIN_LENGTH : int
+    --
+    + AuthSystem(delayPackets, chainLength)
+    + issueEmergencyKey(keyID, icao) : AuthKey
+    + getNextNormalKey() : AuthKey
+    + discloseNormalKey(keyIndex)
+    + computeAuthMAC(key, message) : mac, ms
+    + verifyAuth(key, message, mac) : isValid, ms, reason
+    + verifyProximity(distance, delay) : granted, dist
+    --
+    - generateKeyChain(len) : cell
+    - verifyKeyChainIntegrity(keyIndex) : bool
+    - processBufferForIndex(keyIndex)
+    - verifyInstant(key, message, mac) : isValid, reason
+    - verifyDelayed(key, message, mac) : isValid, ms, reason
+}
+
+class AuthKey {
+    + keyID : int32
+    + keyMaterial : uint8[32]
+    + issueTime : int64
+    + signature : uint8[16]
+    + used : bool
+    --
+    + AuthKey(keyID, keyMaterial, issueTime, signature)
+}
+
+class SecureKeyStore {
+    - keyStore : Map
+    - usedKeyIDs : Map
+    + hardwareProtected : bool
+    --
+    + SecureKeyStore()
+    + storeKey(key)
+    + useKey(keyID) : AuthKey
+    + peekKey(keyID) : AuthKey
+    + isProtected() : bool
+}
+
+class ProximityVerifier {
+    + {static} LIGHT_SPEED : double
+    + {static} MAX_RANGE_M : double
+    + {static} BIT_COUNT : int
+    + {static} BASE_PROC_TIME : double
+    --
+    + {static} buildRegisters() : reg0, reg1
+    + {static} measureRTT(reg0, reg1, dist, delay) : time, bits
+    + {static} computeRange(totalTime) : double
+    + {static} checkAccess(reg0, reg1, dist, delay) : granted, ...
+}
+
+' ===================================================
+' UTILITY FUNCTIONS
+' ===================================================
+
+package "Cryptographic Utilities" #F8F8F8 {
+
+    class computeMAC << (F,#DDDDFF) function >> {
+        + {static} computeMAC(key, message) : uint8[7]
+        --
+        - {static} fallbackMAC(key, message) : uint8[7]
+        - {static} hashBytes(input) : uint8[32]
+    }
+
+    class signVerify << (F,#DDDDFF) function >> {
+        + {static} signVerify(mode, keyVal, material, sig) : result
+    }
+
+    class generateKeypair << (F,#DDDDFF) function >> {
+        + {static} generateKeypair() : publicKey, privateKey
+    }
+}
+
+' ===================================================
+' TEST SCRIPTS
+' ===================================================
+
+package "Simulation Scripts" #F0FFF0 {
+
+    class AdsbAuthMain << (S,#AAFFAA) script >> {
+        - Tests 1-4 : Emergency path scenarios
+        - Test 5    : Normal path TESLA disclosure
+        - Tests 6-7 : Proximity verification
+    }
+
+    class runProximityTest << (S,#AAFFAA) script >> {
+        + runProximityTest()
+    }
+
+    class runProximityMonteCarlo << (S,#AAFFAA) script >> {
+        + runProximityMonteCarlo() : dists, ests x2
+    }
+}
+
+' ===================================================
+' ENUMERATIONS
+' ===================================================
+
+package "Result Codes" #FFF8F0 {
+
+    enum VerificationResult {
+        VALID_EMERGENCY
+        VALID_DELAYED
+        AWAITING_KEY_DISCLOSURE
+        PENDING_DELAYED_VERIFICATION
+        KEY_ALREADY_USED
+        REPLAY_DETECTED
+        INVALID_SIGNATURE
+        MAC_MISMATCH
+        KEY_CHAIN_INVALID
+    }
+}
+
+' ===================================================
+' RELATIONSHIPS
+' ===================================================
+
+' Composition: AuthSystem owns its store
+AuthSystem *--> SecureKeyStore : owns >
+
+' AuthSystem creates and manages AuthKey objects
+AuthSystem ..> AuthKey : creates & stores >
+
+' SecureKeyStore holds AuthKey records
+SecureKeyStore o--> AuthKey : holds >
+
+' AuthSystem delegates all crypto to utilities
+AuthSystem ..> computeMAC    : uses >
+AuthSystem ..> signVerify     : uses >
+AuthSystem ..> generateKeypair : uses at startup >
+
+' AuthSystem calls ProximityVerifier for RTT checks
+AuthSystem ..> ProximityVerifier : delegates proximity check >
+
+' Entry point drives the system
+AdsbAuthMain ..> AuthSystem         : creates & drives >
+AdsbAuthMain ..> runProximityTest   : calls >
+AdsbAuthMain ..> runProximityMonteCarlo : calls >
+
+' Proximity scripts use the static verifier
+runProximityTest       ..> ProximityVerifier : calls static methods >
+runProximityMonteCarlo ..> ProximityVerifier : calls static methods >
+
+' Result codes returned by AuthSystem
+AuthSystem ..> VerificationResult : returns >
+
+' ===================================================
+' NOTES
+' ===================================================
+
+note right of AuthSystem
+  Routes in verifyAuth():
+  keyID > CHAIN_LENGTH  → Emergency (instant)
+  keyID <= CHAIN_LENGTH → Normal (TESLA, buffered)
+end note
+
+note right of ProximityVerifier
+  All methods are static.
+  No instance needed.
+  Used by AuthSystem and
+  both proximity scripts.
+end note
+
+note bottom of AdsbAuthMain
+  ENTRY POINT
+  Run: AdsbAuthMain
+  in MATLAB Command Window
+end note
+
+' ===================================================
+' LEGEND
+' ===================================================
+
+legend right
+  |= Symbol       |= Meaning              |
+  | *-->          | Composition (owns)    |
+  | o-->          | Aggregation (holds)   |
+  | ..>           | Uses / Depends on     |
+  | << script >>  | Runnable MATLAB script|
+  | << function >>| Standalone function   |
+endlegend
+
+@enduml
