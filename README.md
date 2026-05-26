@@ -387,7 +387,3 @@ src = utils.LiveADSBApi('your_username', 'your_password');
 In `onExport()`, replace `save(...)` with `writetable(struct2table(...), fname)`.
 
 ---
-
-## Citation
-
-> Sooriyaarachchi, M., & Abdelhadi, A. (2026). *Emergency-First Authentication for ADS-B: A Dual-Path Protocol with Proximity Verification.* IEEE Conference on Communications and Network Security.
