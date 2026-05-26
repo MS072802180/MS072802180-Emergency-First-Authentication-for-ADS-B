@@ -86,17 +86,6 @@ The GUI connects to four different data sources so you can test against syntheti
 
 ---
 
-## Data Source Modes
-
-| Feature | Mode 1: Simulation | Mode 2: Prerecorded | Mode 3: Live API | Mode 4: Live SDR |
-|---|---|---|---|---|
-| Data source | Synthetic | ADS-B Exchange JSON | OpenSky Network | RTL-SDR dongle |
-| Internet required | No | Yes (first load) | Yes | No |
-| Hardware required | No | No | No | Yes (RTL-SDR) |
-| MATLAB Cloud | ✅ Yes | ✅ Yes | ✅ Yes | ❌ No |
-| Real-time | Simulated | Historical playback | 5–10 s delay | < 100 ms |
-| Sub-modes | — | 2A / 2B / 2C | — | — |
-| Best for | Testing / demo | Research / offline | Global live demo | Highest fidelity local |
 
 ### Mode 1 — Simulation
 
